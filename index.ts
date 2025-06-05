@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import { Room } from './types';
 
 dotenv.config();
-//hehehe
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -44,6 +44,7 @@ app.get('/health', (req: Request, res: Response) => {
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
+  const socketType = socket.handshake.query.type;
 
   // Join room
   socket.on('join-room', (roomId: string, userId: string, isHost: boolean) => {
@@ -81,77 +82,108 @@ io.on('connection', (socket) => {
       // Store connection
       room.connections.set(userId, socket.id);
 
-      console.log(`User ${userId} joined room ${roomId} as ${isHost ? 'host' : 'participant'}`);
+      // Notify others in the room
+      socket.to(roomId).emit('user-joined', userId, isHost);
+
+      // Send list of current participants to the new user
+      const participants = Array.from(room.participants)
+        .filter(p => p !== userId);
+      socket.emit('room-participants', participants);
+
+      console.log(`User ${userId} joined room ${roomId} as ${isHost ? 'host' : 'participant'} (${socketType})`);
     } catch (error) {
       console.error('Error joining room:', error);
       socket.emit('error', 'Failed to join room');
     }
   });
 
-  // WebRTC signaling
-  socket.on('offer', (roomId: string, fromUserId: string, offer: any) => {
+  // Chat message handling
+  socket.on('chat-message', (roomId: string, message: any) => {
     try {
-      const room = rooms.get(roomId);
-      if (!room) {
-        throw new Error('Room not found');
-      }
+      console.log('Received chat message:', message);
+      // Broadcast the message to all users in the room including sender
+      io.in(roomId).emit('chat-message', message);
+    } catch (error) {
+      console.error('Error handling chat message:', error);
+      socket.emit('error', 'Failed to send chat message');
+    }
+  });
 
-      // Broadcast offer to all participants except sender
-      room.participants.forEach(participantId => {
-        if (participantId !== fromUserId) {
-          const participantSocketId = room.connections.get(participantId);
-          if (participantSocketId) {
-            io.to(participantSocketId).emit('offer', fromUserId, offer);
+  // Room synchronization
+  socket.on('sync-time', (roomId: string, currentTime: number) => {
+    socket.to(roomId).emit('sync-time', currentTime);
+  });
+
+  socket.on('sync-lyrics', (roomId: string, currentLyric: string) => {
+    socket.to(roomId).emit('sync-lyrics', currentLyric);
+  });
+
+  // WebRTC signaling - only handle if not a chat socket
+  if (socketType !== 'chat') {
+    socket.on('offer', (roomId: string, fromUserId: string, offer: any) => {
+      try {
+        const room = rooms.get(roomId);
+        if (!room) {
+          throw new Error('Room not found');
+        }
+
+        // Broadcast offer to all participants except sender
+        room.participants.forEach(participantId => {
+          if (participantId !== fromUserId) {
+            const participantSocketId = room.connections.get(participantId);
+            if (participantSocketId) {
+              io.to(participantSocketId).emit('offer', fromUserId, offer);
+            }
+          }
+        });
+      } catch (error) {
+        console.error('Error handling offer:', error);
+        socket.emit('error', 'Failed to handle offer');
+      }
+    });
+
+    socket.on('answer', (roomId: string, fromUserId: string, answer: any) => {
+      try {
+        const room = rooms.get(roomId);
+        if (!room) {
+          throw new Error('Room not found');
+        }
+
+        // Send answer to the host
+        if (room.hostId) {
+          const hostSocketId = room.connections.get(room.hostId);
+          if (hostSocketId) {
+            io.to(hostSocketId).emit('answer', fromUserId, answer);
           }
         }
-      });
-    } catch (error) {
-      console.error('Error handling offer:', error);
-      socket.emit('error', 'Failed to handle offer');
-    }
-  });
-
-  socket.on('answer', (roomId: string, fromUserId: string, answer: any) => {
-    try {
-      const room = rooms.get(roomId);
-      if (!room) {
-        throw new Error('Room not found');
+      } catch (error) {
+        console.error('Error handling answer:', error);
+        socket.emit('error', 'Failed to handle answer');
       }
+    });
 
-      // Send answer to the host
-      if (room.hostId) {
-        const hostSocketId = room.connections.get(room.hostId);
-        if (hostSocketId) {
-          io.to(hostSocketId).emit('answer', fromUserId, answer);
+    socket.on('ice-candidate', (roomId: string, fromUserId: string, candidate: any) => {
+      try {
+        const room = rooms.get(roomId);
+        if (!room) {
+          throw new Error('Room not found');
         }
-      }
-    } catch (error) {
-      console.error('Error handling answer:', error);
-      socket.emit('error', 'Failed to handle answer');
-    }
-  });
 
-  socket.on('ice-candidate', (roomId: string, fromUserId: string, candidate: any) => {
-    try {
-      const room = rooms.get(roomId);
-      if (!room) {
-        throw new Error('Room not found');
-      }
-
-      // Broadcast ICE candidate to all participants except sender
-      room.participants.forEach(participantId => {
-        if (participantId !== fromUserId) {
-          const participantSocketId = room.connections.get(participantId);
-          if (participantSocketId) {
-            io.to(participantSocketId).emit('ice-candidate', fromUserId, candidate);
+        // Broadcast ICE candidate to all participants except sender
+        room.participants.forEach(participantId => {
+          if (participantId !== fromUserId) {
+            const participantSocketId = room.connections.get(participantId);
+            if (participantSocketId) {
+              io.to(participantSocketId).emit('ice-candidate', fromUserId, candidate);
+            }
           }
-        }
-      });
-    } catch (error) {
-      console.error('Error handling ICE candidate:', error);
-      socket.emit('error', 'Failed to handle ICE candidate');
-    }
-  });
+        });
+      } catch (error) {
+        console.error('Error handling ICE candidate:', error);
+        socket.emit('error', 'Failed to handle ICE candidate');
+      }
+    });
+  }
 
   // Handle disconnection
   socket.on('disconnect', () => {
